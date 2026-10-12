@@ -1,0 +1,51 @@
+name: shopx-factory
+x-control: &control
+  image: shopx-control-plane:local
+  build: .
+  init: true
+  restart: unless-stopped
+  mem_limit: 192m
+  networks: [oracle]
+  logging:
+    driver: json-file
+    options: {max-size: 5m, max-file: "2"}
+services:
+  bootstrap:
+    <<: *control
+    profiles: [setup]
+    restart: "no"
+    command: [node, dist/bootstrap.js]
+    environment: {CONTROL_BOOTSTRAP_FILE: /run/control/bootstrap.json}
+    volumes: ["${CONTROL_BOOTSTRAP_CONFIG:?Supply private bootstrap configuration}:/run/control/bootstrap.json:ro"]
+  api:
+    <<: *control
+    environment: {CONTROL_CONFIG_FILE: /run/control/api.json}
+    volumes: ["${CONTROL_API_CONFIG:?Supply private API configuration}:/run/control/api.json:ro"]
+    ports: ["127.0.0.1:4100:4100"]
+  worker:
+    <<: *control
+    mem_limit: 256m
+    networks: [oracle, probes]
+    command: [flock, --exclusive, --nonblock, "${CONTROL_STATE_DIRECTORY}/worker.lock", node, dist/worker.js]
+    environment:
+      CONTROL_WORKER_FILE: /run/control/worker.json
+      SHOPX_WORKER_LOCK_HELD: "1"
+    volumes:
+      - "${CONTROL_WORKER_CONFIG:?Supply private worker configuration}:/run/control/worker.json:ro"
+      - "${CONTROL_STATE_DIRECTORY:?Supply private state directory}:${CONTROL_STATE_DIRECTORY}"
+      - "${CONTROL_ASSETS_DIRECTORY:?Supply reviewed assets}:${CONTROL_ASSETS_DIRECTORY}:ro"
+      - /var/run/docker.sock:/var/run/docker.sock
+  console:
+    image: ${CONTROL_ADMIN_IMAGE:?Supply a compatible admin release image}
+    init: true
+    restart: unless-stopped
+    mem_limit: 320m
+    networks: [oracle]
+    ports: ["127.0.0.1:3200:3000"]
+    environment:
+      SHOPX_ADMIN_MODE: control
+      SHOPX_CONTROL_API_ORIGIN: http://api:4100
+      SHOPX_CONTROL_ORIGIN: http://localhost:3200
+networks:
+  oracle: {external: true, name: "${CONTROL_ORACLE_NETWORK}"}
+  probes: {external: true, name: "${CONTROL_PROBE_NETWORK}"}
