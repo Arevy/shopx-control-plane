@@ -115,4 +115,5 @@ export const publicAccount = (u: Account) => ({
 	name: u.name || "",
 	role: u.role,
 	disabled: Boolean(u.disabled),
+	googleConnected: Boolean(u.google),
 });

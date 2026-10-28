@@ -1,0 +1,25 @@
+logging {
+  level = "warn"
+  format = "json"
+}
+loki.source.api "shopx" {
+  http {
+    listen_address = "0.0.0.0"
+    listen_port = 3500
+  }
+  use_incoming_timestamp = true
+  max_send_message_size = "2MiB"
+  forward_to = [loki.process.shopx.receiver]
+}
+loki.process "shopx" {
+  stage.tenant {
+    label = "platform_id"
+  }
+  forward_to = [loki.write.shopx.receiver]
+}
+loki.write "shopx" {
+  endpoint {
+    url = "http://obs-loki:3100/loki/api/v1/push"
+    batch_size = "256KiB"
+  }
+}

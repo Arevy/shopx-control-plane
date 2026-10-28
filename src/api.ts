@@ -1,7 +1,15 @@
 import express, { Request, Response, NextFunction } from "express";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { isIP } from "node:net";
+import { ObservabilitySettings, observabilityRoutes } from "./observability";
 import { OracleStore, DatabaseSettings, settings } from "./store";
 import { checkPassword, encodePassword } from "./auth";
+import {
+	googleProvider,
+	googleRoutes,
+	GoogleProvider,
+	GoogleSettings,
+} from "./google";
 import {
 	Problem,
 	fail,
@@ -9,6 +17,7 @@ import {
 	inventory,
 	requestCreation,
 	requestAction,
+	requestConfiguration,
 	validateManifest,
 	authorize,
 	State,
@@ -33,6 +42,9 @@ export interface ApiSettings {
 	port: number;
 	host: string;
 	initialShop?: { name: string; storefront: string; admin: string };
+	google?: GoogleSettings;
+	proxyKey?: string;
+	observability?: ObservabilitySettings;
 }
 const wrap =
 	(fn: (req: Request, res: Response) => Promise<unknown>) =>
@@ -56,9 +68,37 @@ function user(s: State, req: Request) {
 	if (!result) return fail(401, "AUTHENTICATION_REQUIRED");
 	return result;
 }
-export function application(store: OracleStore, config: ApiSettings) {
+export function application(
+	store: OracleStore,
+	config: ApiSettings,
+	identityProvider?: GoogleProvider
+) {
 	const app = express();
+	if (config.proxyKey && !/^[a-f0-9]{64}$/.test(config.proxyKey))
+		throw new Error("Invalid control proxy key");
 	app.disable("x-powered-by");
+	app.use((req, res, next) => {
+		const started = Date.now();
+		const requestId = randomUUID();
+		res.set("X-Request-ID", requestId);
+		res.once("finish", () => {
+			if (req.path.startsWith("/internal/") || req.path.startsWith("/health/"))
+				return;
+			console.log(
+				JSON.stringify({
+					level: "info",
+					event: "http_request",
+					message: "Control request completed",
+					method: req.method,
+					path: req.route?.path || "/unmatched",
+					status: res.statusCode,
+					duration_ms: Date.now() - started,
+					request_id: requestId,
+				})
+			);
+		});
+		next();
+	});
 	app.use((req, res, next) => {
 		res
 			.set("Cache-Control", "no-store")
@@ -73,8 +113,9 @@ export function application(store: OracleStore, config: ApiSettings) {
 		next();
 	});
 	app.use(express.json({ limit: "16kb" }));
+	app.use(observabilityRoutes(store, config.observability, user));
 	const setSession = (res: Response, token: string) =>
-		res.set(
+		res.append(
 			"Set-Cookie",
 			`sx_control=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800${
 				config.origin.startsWith("https:") ? "; Secure" : ""
@@ -90,6 +131,37 @@ export function application(store: OracleStore, config: ApiSettings) {
 			derivations--;
 		}
 	};
+	app.use(
+		"/v1",
+		googleRoutes(
+			store,
+			config.origin,
+			identityProvider ||
+				(config.google
+					? googleProvider(config.google, config.origin)
+					: undefined),
+			{
+				user,
+				source: (req) => {
+					const key = req.headers["x-shopx-proxy-key"];
+					const address = req.headers["x-shopx-client-address"];
+					if (
+						config.proxyKey &&
+						typeof key === "string" &&
+						/^[a-f0-9]{64}$/.test(key) &&
+						timingSafeEqual(Buffer.from(key), Buffer.from(config.proxyKey)) &&
+						typeof address === "string" &&
+						isIP(address)
+					)
+						return address;
+					return req.socket.remoteAddress || "unknown";
+				},
+				password: (value, encoded) =>
+					passwordWork(() => checkPassword(value, encoded)),
+				session: setSession,
+			}
+		)
+	);
 	app.get(
 		"/health/ready",
 		wrap(async (_req, res) => {
@@ -417,6 +489,28 @@ export function application(store: OracleStore, config: ApiSettings) {
 			)
 				fail(404, "OPERATION_NOT_FOUND");
 			res.json(op);
+		})
+	);
+	app.post(
+		"/v1/platforms/:id/configuration",
+		wrap(async (req, res) => {
+			const actor = user(await store.read(), req);
+			const operation = await store.transaction(
+				(s) =>
+					requestConfiguration(
+						s,
+						user(s, req),
+						req.header("Idempotency-Key"),
+						req.params.id,
+						req.body
+					),
+				{
+					actor: actor.id,
+					event: "configuration.requested",
+					target: req.params.id,
+				}
+			);
+			res.status(202).json(operation);
 		})
 	);
 	app.use((_req, res) => res.status(404).json({ error: "NOT_FOUND" }));

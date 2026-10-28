@@ -1,0 +1,96 @@
+x-observability: &observability
+  profiles: [observability]
+  restart: unless-stopped
+  init: true
+  networks: [observability]
+  labels: {shopx.observability: "true"}
+  security_opt: [no-new-privileges:true]
+  cap_drop: [ALL]
+  logging:
+    driver: json-file
+    options: {max-size: 5m, max-file: "2"}
+services:
+  obs-loki:
+    <<: *observability
+    image: grafana/loki:3.7.9
+    command: [-config.file=/etc/loki/config.yaml]
+    mem_limit: 512m
+    cpus: 0.75
+    volumes:
+      - ${SHOPX_OBSERVABILITY_DIRECTORY:-../.local/observability}/loki.yaml:/etc/loki/config.yaml:ro
+      - obs-loki:/loki
+  obs-alloy:
+    <<: *observability
+    user: alloy
+    image: grafana/alloy:v1.21.2
+    command: [run, --storage.path=/var/lib/alloy, --server.http.listen-addr=0.0.0.0:12345, /etc/alloy/config.alloy]
+    mem_limit: 256m
+    cpus: 0.5
+    volumes:
+      - ${SHOPX_OBSERVABILITY_DIRECTORY:-../.local/observability}/config.alloy:/etc/alloy/config.alloy:ro
+      - obs-alloy:/var/lib/alloy
+  obs-prometheus:
+    <<: *observability
+    image: prom/prometheus:v3.15.1
+    command: [--config.file=/etc/prometheus/prometheus.yaml, --storage.tsdb.retention.time=7d, --storage.tsdb.retention.size=1GB, --storage.tsdb.path=/prometheus]
+    mem_limit: 256m
+    cpus: 0.5
+    volumes:
+      - ${SHOPX_OBSERVABILITY_DIRECTORY:-../.local/observability}/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+      - ${SHOPX_OBSERVABILITY_DIRECTORY:-../.local/observability}/rules.yaml:/etc/prometheus/rules.yaml:ro
+      - ${SHOPX_OBSERVABILITY_DIRECTORY:-../.local/observability}/token:/run/secrets/telemetry-token:ro
+      - obs-prometheus:/prometheus
+  obs-grafana:
+    <<: *observability
+    networks: [observability, observability-access]
+    image: grafana/grafana:13.3.0
+    mem_limit: 384m
+    cpus: 0.5
+    ports: ["127.0.0.1:3201:3000"]
+    environment:
+      GF_SERVER_ROOT_URL: http://localhost:3201
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_AUTH_DISABLE_LOGIN_FORM: "false"
+      GF_SECURITY_ADMIN_USER: shopx-operator
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana-password
+      GF_SECURITY_COOKIE_SAMESITE: strict
+      GF_SECURITY_ALLOW_EMBEDDING: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_LOG_MODE: console
+      GF_LOG_CONSOLE_FORMAT: json
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+    volumes:
+      - ${SHOPX_OBSERVABILITY_DIRECTORY:-../.local/observability}/grafana-password:/run/secrets/grafana-password:ro
+      - ${SHOPX_OBSERVABILITY_DIRECTORY:-../.local/observability}/provisioning:/etc/grafana/provisioning:ro
+      - ${SHOPX_OBSERVABILITY_DIRECTORY:-../.local/observability}/dashboards:/var/lib/grafana/dashboards:ro
+      - obs-grafana:/var/lib/grafana
+  obs-collector:
+    <<: *observability
+    image: shopx-control-plane:local
+    command: [node, observability/collector.mjs]
+    mem_limit: 192m
+    cpus: 0.5
+    read_only: true
+    environment: {OBSERVABILITY_CONFIG_FILE: /run/observability/config.json}
+    volumes:
+      - ${SHOPX_OBSERVABILITY_DIRECTORY:-../.local/observability}/collector.private.json:/run/observability/config.json:ro
+      - ${SHOPX_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock:ro
+      - obs-positions:/data
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://localhost:4200/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+networks:
+  observability: {external: true, name: shopx-observability}
+  observability-access: {}
+volumes:
+  obs-loki:
+  obs-alloy:
+  obs-prometheus:
+  obs-grafana:
+  obs-positions:

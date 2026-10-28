@@ -6,7 +6,8 @@ This first provider is intentionally limited to one trusted local Docker host an
 
 ## Implemented scope
 
-- Preview and create a platform through the global console, then start, stop, restart or retry a failed operation.
+- Preview and create a platform through the global console, then customize, start, stop, restart or retry a failed operation.
+- Revision-guarded settings publication, four design presets, design reuse for a new store, and optional Google sign-in for password-confirmed invited accounts. See [customization and Google setup](docs/customization-and-google.md).
 - Separate Oracle schema, Redis volume, backend, storefront, store admin, gateway, JWT secret and owner credentials per platform.
 - Explicit empty-store or demo-store provisioning. Demo uses a content-only starter with 45 reviewed products and images. Existing customer, order, review and account data are never copied.
 - Invitation-only management signup, scoped platform creators, account disabling, password changes and session revocation. The configuration form includes identity, owner, language, content and all theme colors before review.
@@ -14,12 +15,13 @@ This first provider is intentionally limited to one trusted local Docker host an
 - Checksummed empty-schema installation, resumable DDL checkpoints and repeated-install protection. No reset/drop operation is exposed.
 - Gateway probes verify platform identity/config revision, catalog access and an actual product image. Unobserved health expires to `unknown` after 90 seconds.
 - Immutable image IDs, retained image tags and release manifests. Rebuilding the factory does not upgrade an existing platform silently.
+- Optional private Grafana/Loki/Alloy/Prometheus monitoring, tenant-authorized status/logs in the console, readiness history, resource metrics and local alert rules. See [observability setup and security boundaries](docs/observability.md), including standalone deployment.
 
-Native/Electron application signing, store publication, RN web hosting, editing an already-created platform's configuration, customer-domain/TLS automation, backup/restore jobs, legacy-platform adoption, MFA/SSO, upgrades and fine-grained commerce roles are **not implemented** in this milestone. Running applications do not depend on the control API to serve requests. Public configuration is stored in each business schema. See [onboarding, data ownership and access](docs/onboarding.md) for the implemented signup and setup flow.
+Native/Electron application signing, store publication, RN web hosting, customer-domain/TLS automation, backup/restore jobs, legacy-platform adoption, MFA, enterprise SSO, upgrades and fine-grained commerce roles are **not implemented** in this milestone. Running applications do not depend on the control API to serve requests. Public configuration is stored in each business schema. See [onboarding, data ownership and access](docs/onboarding.md) for the implemented signup and setup flow.
 
 ## Technology and patterns
 
-Node 22, TypeScript, Express 4 and node-oracledb 6. Management uses a small REST API; commerce remains GraphQL. The console keeps React, Next.js, MobX and SCSS. Mobile adapters retain Redux and React Native Paper.
+Node 22.23.4, TypeScript, Express 4 and node-oracledb 6. Management uses a small REST API; commerce remains GraphQL. The console keeps React, Next.js, MobX and SCSS. Mobile adapters retain Redux and React Native Paper.
 
 `domain.ts` contains validation and state transitions. `OracleStore` is the repository/transaction boundary; `ComposeProvider` is the infrastructure adapter; the worker is the operation orchestrator. There is no Docker socket or provisioning credential in the API container.
 
@@ -28,6 +30,7 @@ The first registry uses a versioned JSON aggregate in `SX_REGISTRY`, locked with
 ## Run independently
 
 ```sh
+nvm install && nvm use
 npm ci
 npm test
 docker build -t shopx-control-plane:local .
@@ -70,4 +73,10 @@ The current loopback-only provider deliberately enables insecure commerce cookie
 
 ## Verification
 
-`npm test` covers domain state transitions, duplicate requests, capacity/port reservations, roles, CSRF, session revocation, invitation expiry/replacement/reuse, scoped ownership, password rotation, disabled accounts, login throttling and stale health. These tests do not provision Docker or Oracle. Integration evidence and limitations belong in the workspace verification record. Do not replace Oracle 19.3-compatible create/check logic with `CREATE USER IF NOT EXISTS`; that syntax only appears in later 19c releases. See the [Oracle CREATE USER reference](https://docs.oracle.com/en/database/oracle/oracle-database/19/sqlrf/CREATE-USER.html).
+The October 27, 2026 run passed 34 tests and the production TypeScript build. `npm test` covers domain state transitions, duplicate requests, capacity/port reservations, configuration revisions/retries, Google state/PKCE/linking checks, roles, CSRF, session revocation, invitation expiry/replacement/reuse, scoped ownership, password rotation, disabled accounts, login throttling and stale health. These tests do not provision Docker or Oracle. Integration evidence and limitations belong in the workspace verification record. Do not replace Oracle 19.3-compatible create/check logic with `CREATE USER IF NOT EXISTS`; that syntax only appears in later 19c releases. See the [Oracle CREATE USER reference](https://docs.oracle.com/en/database/oracle/oracle-database/19/sqlrf/CREATE-USER.html).
+
+## Security maintenance
+
+Use `nvm install && nvm use` before installing dependencies or running tests. Docker pins Node 22.23.4. The console requires a patched compatible Next.js release (the reviewed workspace baseline is 15.5.28). The generated gateway strips client-supplied `x-middleware-subrequest`, overwrites forwarded client addresses and applies request timeouts. The workspace pins Nginx 1.30.6; independent operators must provide an equally patched gateway image.
+
+Google login quotas are scoped to client address; password-confirmed account linking has separate per-account limits and pending-flow capacity. A private 64-character hexadecimal `proxyKey` in the API configuration must match the console's server-only `SHOPX_CONTROL_PROXY_KEY` (`CONTROL_PROXY_KEY` in Compose). Only this authenticated proxy can supply a forwarded client address. Without the key, the API limits the direct peer address. The console derives that address from its TCP peer and ignores client-supplied forwarding headers; deployments behind another proxy need an explicitly trusted ingress design.

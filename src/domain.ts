@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { Experience, validateExperience } from "./customization";
 
 export class Problem extends Error {
 	constructor(public status: number, public code: string) {
@@ -22,6 +23,7 @@ export interface Account {
 	role: Role;
 	name?: string;
 	disabled?: boolean;
+	google?: { subject: string; email: string };
 }
 export interface Invitation {
 	id: string;
@@ -33,7 +35,13 @@ export interface Invitation {
 	usedAt?: number;
 	revokedAt?: number;
 }
-export type Action = "create" | "start" | "stop" | "restart" | "retry";
+export type Action =
+	| "create"
+	| "start"
+	| "stop"
+	| "restart"
+	| "retry"
+	| "configure";
 export interface Manifest {
 	slug: string;
 	displayName: string;
@@ -44,6 +52,7 @@ export interface Manifest {
 	template: "general-store-real-v1";
 	seedMode?: "demo" | "empty";
 	branding: { accent: string; background: string; surface: string };
+	experience?: Experience;
 }
 export interface Platform {
 	id: string;
@@ -60,6 +69,7 @@ export interface Platform {
 	services?: Record<string, boolean>;
 	operationId: string;
 	createdBy?: string;
+	configurationVersion?: 2;
 }
 export interface Operation {
 	id: string;
@@ -73,6 +83,7 @@ export interface Operation {
 	createdAt: string;
 	updatedAt: string;
 	error?: string;
+	configuration?: { manifest: Manifest; revision: number };
 }
 export interface State {
 	version: 1;
@@ -82,6 +93,16 @@ export interface State {
 	invitations?: Invitation[];
 	sessions: { hash: string; userId: string; expires: number }[];
 	loginAttempts: Record<string, { count: number; until: number }>;
+	googleFlows?: {
+		hash: string;
+		browser: string;
+		nonce: string;
+		verifier: string;
+		expires: number;
+		userId?: string;
+		session?: string;
+		password?: string;
+	}[];
 }
 export const emptyState = (): State => ({
 	version: 1,
@@ -108,6 +129,7 @@ export function validateManifest(input: unknown): Manifest {
 					"priceDisplay",
 					"template",
 					"seedMode",
+					"experience",
 				].includes(k)
 		)
 	)
@@ -163,6 +185,17 @@ export function validateManifest(input: unknown): Manifest {
 			background: c.branding.background.toLowerCase(),
 			surface: c.branding.surface.toLowerCase(),
 		},
+		...(c.experience === undefined
+			? {}
+			: {
+					experience: (() => {
+						try {
+							return validateExperience(c.experience);
+						} catch {
+							return fail(400, "INVALID_EXPERIENCE");
+						}
+					})(),
+			  }),
 	};
 }
 export function authorize(role: Role, action: string) {
@@ -174,7 +207,9 @@ export function authorize(role: Role, action: string) {
 		return;
 	if (
 		role === "PLATFORM_CREATOR" &&
-		["create", "start", "stop", "restart", "retry"].includes(action)
+		["create", "start", "stop", "restart", "retry", "configure"].includes(
+			action
+		)
 	)
 		return;
 	fail(403, "FORBIDDEN");
@@ -235,11 +270,19 @@ export function requestCreation(
 		observed: "unknown",
 		createdAt: now,
 		createdBy: actor,
+		configurationVersion: 2,
 		operationId: op.id,
 		port: firstPort + s.platforms.length,
 	});
 	s.operations.push(op);
 	return op;
+}
+export function configurationApplied(p: Platform, op: Operation) {
+	return Boolean(
+		op.configuration &&
+			p.revision === op.configuration.revision &&
+			JSON.stringify(p.manifest) === JSON.stringify(op.configuration.manifest)
+	);
 }
 export function requestAction(
 	s: State,
@@ -263,6 +306,14 @@ export function requestAction(
 	if (!platform) return fail(404, "PLATFORM_NOT_FOUND");
 	if (role === "PLATFORM_CREATOR" && platform.createdBy !== actor)
 		fail(404, "PLATFORM_NOT_FOUND");
+	const last = s.operations.find((o) => o.id === platform.operationId);
+	if (
+		last?.action === "configure" &&
+		last.status === "failed" &&
+		!configurationApplied(platform, last) &&
+		action !== "retry"
+	)
+		fail(409, "CONFIGURATION_RETRY_REQUIRED");
 	if (
 		s.operations.some(
 			(o) => o.platformId === id && ["queued", "running"].includes(o.status)
@@ -297,12 +348,14 @@ export function requestAction(
 	if (action === "retry") {
 		const failed = s.operations.find((o) => o.id === platform.operationId)!;
 		op.action = failed.action; // Replay the failed intent, never infer a different one.
+		op.configuration = failed.configuration;
 	}
 	if (action === "rebase") {
 		platform.release = currentRelease!;
 		op.action = "create";
 	}
-	platform.desired = op.action === "stop" ? "stopped" : "running";
+	if (op.action !== "configure")
+		platform.desired = op.action === "stop" ? "stopped" : "running";
 	platform.operationId = op.id;
 	s.operations.push(op);
 	return op;
@@ -315,7 +368,99 @@ export const publicConfiguration = (p: Platform) => ({
 	currency: p.manifest.currency,
 	priceDisplay: p.manifest.priceDisplay,
 	branding: p.manifest.branding,
+	...(p.manifest.experience ? { experience: p.manifest.experience } : {}),
 });
+
+export function requestConfiguration(
+	s: State,
+	actor: Account,
+	key: unknown,
+	id: string,
+	input: unknown
+) {
+	authorize(actor.role, "configure");
+	const p = s.platforms.find((v) => v.id === id && canReadPlatform(actor, v));
+	if (!p) return fail(404, "PLATFORM_NOT_FOUND");
+	const body = input as Record<string, unknown>;
+	if (
+		!body ||
+		typeof body !== "object" ||
+		Array.isArray(body) ||
+		Object.keys(body).some(
+			(k) =>
+				![
+					"expectedRevision",
+					"displayName",
+					"locale",
+					"branding",
+					"experience",
+				].includes(k)
+		)
+	)
+		fail(400, "INVALID_CONFIGURATION_PATCH");
+	if (
+		!Number.isSafeInteger(body.expectedRevision) ||
+		(body.expectedRevision as number) < 1 ||
+		(body.expectedRevision as number) >= Number.MAX_SAFE_INTEGER
+	)
+		fail(400, "EXPECTED_REVISION_REQUIRED");
+	if (body.experience !== undefined && p.configurationVersion !== 2)
+		fail(409, "RELEASE_CUSTOMIZATION_UNSUPPORTED");
+	const { expectedRevision, ...changes } = body;
+	const manifest = validateManifest({ ...p.manifest, ...changes });
+	// Fingerprint only explicitly supplied fields: later edits must not change a replay.
+	const patch = Object.fromEntries(
+		(["displayName", "locale", "branding", "experience"] as const)
+			.filter((k) => Object.hasOwn(changes, k))
+			.map((k) => [k, manifest[k]])
+	);
+	const {
+		existing,
+		fingerprint,
+		key: validKey,
+	} = replay(s, actor.id, key, {
+		id,
+		action: "configure",
+		expectedRevision,
+		patch,
+	});
+	if (existing) return existing;
+	if (!p.provisionedAt) fail(409, "NOT_PROVISIONED");
+	if (p.revision !== expectedRevision)
+		fail(409, "CONFIGURATION_REVISION_CONFLICT");
+	if (
+		s.operations.some(
+			(o) => o.platformId === id && ["queued", "running"].includes(o.status)
+		)
+	)
+		fail(409, "OPERATION_IN_PROGRESS");
+	const previous = s.operations.find((o) => o.id === p.operationId);
+	if (
+		previous?.status === "failed" &&
+		previous.action === "configure" &&
+		!configurationApplied(p, previous)
+	)
+		fail(409, "CONFIGURATION_RETRY_REQUIRED");
+	if (JSON.stringify(manifest) === JSON.stringify(p.manifest))
+		fail(409, "CONFIGURATION_UNCHANGED");
+	const now = new Date().toISOString();
+	const op: Operation = {
+		id: randomUUID(),
+		platformId: id,
+		actor: actor.id,
+		key: validKey,
+		hash: fingerprint,
+		action: "configure",
+		configuration: { manifest, revision: p.revision + 1 },
+		status: "queued",
+		step: "queued",
+		createdAt: now,
+		updatedAt: now,
+	};
+	p.operationId = op.id;
+	s.operations.push(op);
+	return op;
+}
 export const canReadPlatform = (account: Account, p: Platform) =>
 	account.role !== "PLATFORM_CREATOR" || p.createdBy === account.id;
 export function inventory(s: State, now = Date.now(), account?: Account) {

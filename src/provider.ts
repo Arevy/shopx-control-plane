@@ -8,6 +8,7 @@ import { randomBytes } from "node:crypto";
 import oracle from "oracledb";
 import { Platform, publicConfiguration, Problem } from "./domain";
 import { DatabaseSettings, settings } from "./store";
+import { gatewayConfiguration } from "./gateway";
 const exec = promisify(execFile);
 // Node fetch may discard a custom Host header. Probe the gateway virtual host
 // explicitly using node:http; the destination and headers are worker-generated.
@@ -386,24 +387,8 @@ export class ComposeProvider {
 				probes: { external: true, name: this.config.probeNetwork },
 			},
 		};
-		const proxy = (target: string) =>
-			`proxy_pass http://${target}; proxy_set_header Host $http_host; proxy_set_header X-Forwarded-Proto $scheme; proxy_set_header X-Forwarded-For $remote_addr;`;
-		writePrivate(
-			path.join(dir, "nginx.conf"),
-			`server { listen 80 default_server; server_name _; return 404; }
-server { listen 80; server_name api.${hostname}; client_max_body_size 6m; location / { ${proxy(
-				"backend:4000"
-			)} } }
-server { listen 80; server_name admin.${hostname}; client_max_body_size 6m; location ~ ^/products/[0-9]+/image$ { ${proxy(
-				"backend:4000"
-			)} } location / { ${proxy("admin:3000")} } }
-server { listen 80; server_name ${hostname}; location ~ ^/products/[0-9]+/image$ { ${proxy(
-				"backend:4000"
-			)} } location /graphql { ${proxy("backend:4000")} } location / { ${proxy(
-				"storefront:3100"
-			)} } }
-`
-		);
+		writePrivate(path.join(dir, "nginx.conf"), gatewayConfiguration(hostname));
+
 		writePrivate(
 			path.join(dir, "compose.json"),
 			JSON.stringify(compose, null, 2)
@@ -478,6 +463,37 @@ server { listen 80; server_name ${hostname}; location ~ ^/products/[0-9]+/image$
 			p,
 			["up", "-d", "--wait", "--wait-timeout", "180"],
 			210000
+		);
+	}
+	async configure(p: Platform) {
+		await this.checkOwnership(p);
+		const dir = this.directory(p);
+		const setup = settings<any>(path.join(dir, "setup.json"));
+		if (setup.schema !== p.schema || setup.configuration.platformId !== p.id)
+			throw new Problem(409, "MANIFEST_CONFLICT");
+		const filename = `configure-${p.revision}.json`;
+		writePrivate(
+			path.join(dir, filename),
+			JSON.stringify({
+				...setup,
+				action: "configure",
+				configuration: publicConfiguration(p),
+			})
+		);
+		await this.compose(
+			p,
+			[
+				"run",
+				"--rm",
+				"--no-deps",
+				"-e",
+				`PLATFORM_SETUP_FILE=/run/platform/${filename}`,
+				"--entrypoint",
+				"node",
+				"backend",
+				"scripts/provision-platform.cjs",
+			],
+			120000
 		);
 	}
 	async stop(p: Platform) {

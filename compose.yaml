@@ -46,6 +46,7 @@ services:
       SHOPX_ADMIN_MODE: control
       SHOPX_CONTROL_API_ORIGIN: http://api:4100
       SHOPX_CONTROL_ORIGIN: http://localhost:3200
+      SHOPX_CONTROL_PROXY_KEY: ${CONTROL_PROXY_KEY:?Supply the private key matching api.json proxyKey}
 networks:
   oracle: {external: true, name: "${CONTROL_ORACLE_NETWORK}"}
   probes: {external: true, name: "${CONTROL_PROBE_NETWORK}"}

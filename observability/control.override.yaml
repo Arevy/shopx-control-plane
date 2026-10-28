@@ -1,0 +1,7 @@
+# Optional addition to the standalone control-plane compose.yaml.
+# api.json must include the generated observability settings before startup.
+services:
+  api:
+    networks: [oracle, observability]
+networks:
+  observability: {external: true, name: shopx-observability}

@@ -1,0 +1,35 @@
+groups:
+  - name: shopx
+    rules:
+      - alert: ShopXPlatformUnavailable
+        expr: (shopx_platform_ready == 0) and on(platform_id) (shopx_platform_desired_running == 1) and on(platform_id) (time() - shopx_platform_checked_timestamp_seconds < 90)
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "Platform {{ $labels.platform_id }} is not ready"
+          description: "Check dependency readiness and recent logs. Intentional stops must be recorded in the control console."
+      - alert: ShopXObservationStale
+        expr: time() - shopx_platform_checked_timestamp_seconds > 90
+        for: 1m
+        labels: {severity: warning}
+        annotations: {summary: "Platform observations are stale"}
+      - alert: ShopXTelemetryTargetUnavailable
+        expr: up{job=~"shopx-control|shopx-collector|alloy|loki"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations: {summary: "A ShopX monitoring target is unavailable"}
+      - alert: ShopXCollectionDelayed
+        expr: time() - shopx_collector_checked_timestamp_seconds > 90
+        for: 1m
+        labels: {severity: warning}
+        annotations: {summary: "Docker collection is delayed"}
+      - alert: ShopXLogCollectionErrors
+        expr: increase(shopx_collector_errors_total[5m]) > 0
+        for: 2m
+        labels: {severity: warning}
+        annotations: {summary: "Log delivery or Docker collection is failing"}
+      - alert: ShopXMonitoringDiskLow
+        expr: shopx_telemetry_storage_available_bytes < 5 * 1024 * 1024 * 1024
+        for: 1m
+        labels: {severity: critical}
+        annotations: {summary: "Less than 5 GiB free on the monitoring volume filesystem"}

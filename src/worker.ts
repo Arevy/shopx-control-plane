@@ -60,6 +60,22 @@ async function main() {
 					await fn();
 				};
 				try {
+					if (op.action === "configure") {
+						if (!op.configuration)
+							throw new Problem(409, "CONFIGURATION_MISSING");
+						const target = { ...p, ...op.configuration };
+						await step("configuration", () => provider.configure(target));
+						await store.transaction(
+							(s) => {
+								const current = s.platforms.find((v) => v.id === p.id)!;
+								current.manifest = target.manifest;
+								current.revision = target.revision;
+							},
+							{ actor: "worker", event: "configuration.applied", target: p.id }
+						);
+						p.manifest = target.manifest;
+						p.revision = target.revision;
+					}
 					if (op.action === "create") {
 						await step("preflight", () => provider.preflight(p));
 						await step("secrets-and-template", () => provider.render(p));
@@ -69,7 +85,8 @@ async function main() {
 					if (op.action === "stop") await step("stop", () => provider.stop(p));
 					else if (op.action === "restart")
 						await step("restart", () => provider.restart(p));
-					else await step("start", () => provider.start(p));
+					else if (op.action !== "configure" || p.desired === "running")
+						await step("start", () => provider.start(p));
 					await step("verify", async () => {
 						for (let attempt = 0; attempt < 12; attempt++) {
 							const healthy = await observe(p);
@@ -77,7 +94,9 @@ async function main() {
 								(v) => v.id === p.id
 							)!;
 							if (
-								op.action === "stop" ? record.observed === "stopped" : healthy
+								p.desired === "stopped"
+									? record.observed === "stopped"
+									: healthy
 							)
 								return;
 							await new Promise((resolve) => setTimeout(resolve, 2500));
